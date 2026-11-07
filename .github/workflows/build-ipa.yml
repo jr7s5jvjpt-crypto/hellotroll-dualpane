@@ -1,0 +1,64 @@
+name: build-ipa
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install xcodegen & ldid
+        run: |
+          brew install xcodegen || true
+          brew install ldid || true
+          if ! command -v ldid >/dev/null 2>&1; then
+            git clone --depth 1 https://github.com/ProcursusTeam/ldid.git ldid-src
+            cd ldid-src && git submodule update --init --recursive
+            make -j4 && sudo make install
+          fi
+          xcodegen --version || true
+          ldid -v || true
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+
+      - name: Build (unsigned)
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project DualPane.xcodeproj \
+            -scheme DualPane \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            build
+
+      - name: Fake sign and package IPA
+        run: |
+          set -euo pipefail
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          echo "APP=$APP"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist"
+          ldid -SResources/DualPane.entitlements "$APP/DualPane"
+          ldid -e "$APP/DualPane" || true
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out && zip -qry DualPane.ipa Payload
+          ls -lh DualPane.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: DualPane-ipa
+          path: out/DualPane.ipa
+          if-no-files-found: error
+          retention-days: 30
